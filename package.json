@@ -1,0 +1,14 @@
+{
+  "name": "student-performance-system-backend",
+  "private": true,
+  "engines": {
+    "node": ">=22 <25"
+  },
+  "scripts": {
+    "convex:dev": "convex dev",
+    "convex:seed": "node scripts/seed-convex.mjs"
+  },
+  "dependencies": {
+    "convex": "^1.34.1"
+  }
+}
