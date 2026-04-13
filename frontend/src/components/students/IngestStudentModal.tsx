@@ -302,7 +302,7 @@ export function IngestStudentModal({
       <Dialog.Root open={open} onOpenChange={handleOpenChange}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 bg-black/70 backdrop-blur-sm z-40" />
-          <Dialog.Content className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md glass-card rounded-3xl p-8 text-center">
+          <Dialog.Content className="!fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md glass-card rounded-3xl p-8 text-center">
             <CheckCircle className="w-16 h-16 text-emerald-400 mx-auto mb-4" />
             <h3 className="text-2xl font-black text-white mb-2">Student Ingested!</h3>
             <p className="text-slate-400 text-sm mb-6">
@@ -340,7 +340,7 @@ export function IngestStudentModal({
     <Dialog.Root open={open} onOpenChange={handleOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 bg-black/70 backdrop-blur-sm z-40" />
-        <Dialog.Content className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-2xl glass-card rounded-3xl p-0 max-h-[90vh] flex flex-col">
+        <Dialog.Content className="!fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-2xl glass-card rounded-3xl p-0 max-h-[min(90dvh,900px)] min-h-0 flex flex-col overflow-hidden">
           {/* Header */}
           <div className="flex items-center justify-between px-8 pt-8 pb-4">
             <div>
@@ -371,7 +371,7 @@ export function IngestStudentModal({
           </div>
 
           {/* Body */}
-          <div className="flex-1 overflow-y-auto px-8 pb-4">{renderStep()}</div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-8 pb-4">{renderStep()}</div>
 
           {/* Errors */}
           {errors.length > 0 && (

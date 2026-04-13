@@ -1,69 +1,58 @@
 import { v } from "convex/values";
 import { mutation } from "../_generated/server";
+import { mergeStudentPartial } from "./defaults";
+import { partialStudent } from "./partialArgs";
 
 /**
  * Batch-create students from a dataset upload (e.g. CSV).
+ * Each row may be partial; merged with defaults server-side.
  * Skips rows whose studentId already exists.
- * Returns counts of inserted vs skipped.
  */
 export const batchCreate = mutation({
   args: {
-    students: v.array(
-      v.object({
-        name: v.string(),
-        studentId: v.string(),
-        email: v.string(),
-        gender: v.string(),
-        age: v.number(),
-        address: v.string(),
-        famsize: v.string(),
-        Pstatus: v.string(),
-        Medu: v.number(),
-        Fedu: v.number(),
-        Mjob: v.string(),
-        Fjob: v.string(),
-        reason: v.string(),
-        guardian: v.string(),
-        traveltime: v.number(),
-        studytime: v.number(),
-        failures: v.number(),
-        schoolsup: v.boolean(),
-        famsup: v.boolean(),
-        paid: v.boolean(),
-        activities: v.boolean(),
-        nursery: v.boolean(),
-        higher: v.boolean(),
-        internet: v.boolean(),
-        romantic: v.boolean(),
-        famrel: v.number(),
-        freetime: v.number(),
-        goout: v.number(),
-        Dalc: v.number(),
-        Walc: v.number(),
-        health: v.number(),
-        absences: v.number(),
-        previousMarks: v.number(),
-      })
-    ),
+    students: v.array(partialStudent),
   },
   handler: async (ctx, args) => {
-    let inserted = 0;
-    let skipped = 0;
+    const merged = args.students.map((p) =>
+      mergeStudentPartial(p as Record<string, unknown>)
+    );
 
-    for (const student of args.students) {
-      const existing = await ctx.db
-        .query("students")
-        .withIndex("by_studentId", (q) => q.eq("studentId", student.studentId))
-        .unique();
+    // Never insert two rows for the same studentId in one chunk (CSV often repeats IDs).
+    // Later rows win over earlier ones for the same key.
+    const byStudentId = new Map<string, (typeof merged)[number]>();
+    for (const row of merged) {
+      byStudentId.set(row.studentId, row);
+    }
+    const uniqueByKey = [...byStudentId.values()];
+    const skippedDupesInChunk = merged.length - uniqueByKey.length;
 
-      if (existing) {
+    // Use .take(1), not .unique(): duplicates can exist in DB (legacy / races); .unique() throws.
+    const existence = await Promise.all(
+      uniqueByKey.map((student) =>
+        ctx.db
+          .query("students")
+          .withIndex("by_studentId", (q) => q.eq("studentId", student.studentId))
+          .take(1)
+      )
+    );
+
+    let skipped = skippedDupesInChunk;
+    const toInsert: typeof merged = [];
+    for (let i = 0; i < uniqueByKey.length; i++) {
+      const existingRow = existence[i]![0];
+      if (existingRow !== undefined) {
         skipped++;
       } else {
-        await ctx.db.insert("students", student);
-        inserted++;
+        toInsert.push(uniqueByKey[i]!);
       }
     }
 
-    return { inserted, skipped, total: args.students.length };
+    await Promise.all(toInsert.map((doc) => ctx.db.insert("students", doc)));
+
+    return {
+      inserted: toInsert.length,
+      skipped,
+      total: args.students.length,
+    };
   },
 });

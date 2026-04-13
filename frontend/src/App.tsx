@@ -44,8 +44,10 @@ export default function App() {
   } = useMlService();
 
   const seedSampleData = useMutation(api.init.seed);
+  const clearAllApplicationData = useMutation(api.clearData.clearAllApplicationData);
   const [seedStatus, setSeedStatus] = useState<"idle" | "loading" | "ok" | "skipped" | "error">("idle");
   const [seedDetail, setSeedDetail] = useState<string | null>(null);
+  const [clearingData, setClearingData] = useState(false);
 
   const handleSeedSampleData = useCallback(async () => {
     setSeedStatus("loading");
@@ -68,6 +70,21 @@ export default function App() {
       );
     }
   }, [seedSampleData]);
+
+  const handleClearAllData = useCallback(async () => {
+    const ok = window.confirm(
+      "Delete ALL students, predictions, and model training history? This cannot be undone. A default model profile will be recreated."
+    );
+    if (!ok) return;
+    setClearingData(true);
+    try {
+      await clearAllApplicationData();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setClearingData(false);
+    }
+  }, [clearAllApplicationData]);
 
   const handlePredictStudent = useCallback(
     async (studentId: string) => {
@@ -211,6 +228,20 @@ export default function App() {
                       <span className="text-slate-300">{predictions.length}</span>
                     </div>
                   </div>
+                  <p className="text-xs text-slate-500 mt-4 leading-relaxed">
+                    To wipe the database for a new study or dataset, use{" "}
+                    <span className="text-slate-400">Upload Dataset</span> and check{" "}
+                    <strong className="text-slate-300">Start fresh</strong> on the preview step, or clear
+                    everything from here.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={clearingData}
+                    onClick={() => void handleClearAllData()}
+                    className="mt-4 w-full rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-sm font-semibold text-red-300 hover:bg-red-500/20 disabled:opacity-50 transition-colors"
+                  >
+                    {clearingData ? "Clearing…" : "Clear all students & insights"}
+                  </button>
                 </div>
               </div>
             </div>

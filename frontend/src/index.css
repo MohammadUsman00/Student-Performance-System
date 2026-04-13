@@ -241,6 +241,19 @@
   animation: fadeIn 0.3s ease forwards;
 }
 
+/* Modals: opacity only — do not animate `transform` here or it overrides centering (-translate-x/y on Dialog.Content). */
+@keyframes modalContentFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.animate-modal-content {
+  animation: modalContentFadeIn 0.25s ease-out forwards;
+}
+
 @keyframes pulse-glow {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }

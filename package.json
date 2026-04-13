@@ -5,10 +5,20 @@
     "node": ">=22 <25"
   },
   "scripts": {
+    "dev": "npm run dev --prefix frontend",
+    "dev:full": "concurrently -k -n convex,vite -c blue,green \"npm run convex:dev\" \"npm run dev\"",
     "convex:dev": "convex dev",
-    "convex:seed": "node scripts/seed-convex.mjs"
+    "convex:seed": "node scripts/seed-convex.mjs",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up --build",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f",
+    "docker:config": "docker compose config"
   },
   "dependencies": {
     "convex": "^1.34.1"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
   }
 }

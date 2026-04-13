@@ -3,8 +3,7 @@ import { action, mutation, query } from "../_generated/server";
 import { api } from "../_generated/api";
 import type { ActionCtx } from "../_generated/server";
 import type { Doc } from "../_generated/dataModel";
-
-const ML_SERVICE_URL = "http://localhost:8000";
+import { mlServiceBaseUrl } from "./serviceUrl";
 
 /** Strip Convex system fields + non-ML fields, return only ML features. */
 function extractMlFeatures(
@@ -37,7 +36,7 @@ export const predictAll = action({
     for (const student of students) {
       const mlFeatures = extractMlFeatures(student);
 
-      const resp = await fetch(`${ML_SERVICE_URL}/predict`, {
+      const resp = await fetch(`${mlServiceBaseUrl()}/predict`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -65,7 +64,10 @@ export const predictAll = action({
 /** Predict for a single student by their studentId string. */
 export const predictSingle = action({
   args: { studentId: v.string() },
-  handler: async (ctx: ActionCtx, args) => {
+  handler: async (
+    ctx: ActionCtx,
+    args
+  ): Promise<Record<string, unknown>> => {
     const student: Doc<"students"> | null = await ctx.runQuery(
       api.students.list.getById,
       { studentId: args.studentId }
@@ -78,11 +80,11 @@ export const predictSingle = action({
     const activeModel: Doc<"modelConfigs"> | null = await ctx.runQuery(
       api.ml.models.getActiveModel
     );
-    const modelName = activeModel?.modelName || "linear_regression";
+    const modelName: string = activeModel?.modelName || "linear_regression";
 
     const mlFeatures = extractMlFeatures(student);
 
-    const resp = await fetch(`${ML_SERVICE_URL}/predict`, {
+    const resp = await fetch(`${mlServiceBaseUrl()}/predict`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ studentData: mlFeatures, modelName }),
@@ -93,7 +95,10 @@ export const predictSingle = action({
       throw new Error(`ML prediction failed: ${resp.status} — ${text}`);
     }
 
-    const pred = await resp.json();
+    const pred = (await resp.json()) as {
+      predictedScore: number;
+      riskLevel: string;
+    };
 
     await ctx.runMutation(api.ml.predictions.storePrediction, {
       studentId: student.studentId,
@@ -102,7 +107,7 @@ export const predictSingle = action({
       activeModel: modelName,
     });
 
-    return pred;
+    return pred as Record<string, unknown>;
   },
 });
 
@@ -114,10 +119,11 @@ export const storePrediction = mutation({
     activeModel: v.string(),
   },
   handler: async (ctx, args) => {
-    const existing = await ctx.db
+    const existingRows = await ctx.db
       .query("predictions")
       .withIndex("by_studentId", (q) => q.eq("studentId", args.studentId))
-      .unique();
+      .take(1);
+    const existing = existingRows[0];
 
     if (existing) {
       await ctx.db.patch(existing._id, {

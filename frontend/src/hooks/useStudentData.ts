@@ -16,9 +16,13 @@ export interface PredictionView {
   riskLevel: string;
 }
 
+/** Stable fallbacks so `useMemo` deps are not a new `[]` every render while queries load. */
+const EMPTY_STUDENTS: StudentView[] = [];
+const EMPTY_PREDICTIONS: PredictionView[] = [];
+
 export function useStudentData() {
-  const students = useQuery(api.students.list.list) ?? [];
-  const predictions = useQuery(api.ml.predictions.getPredictions) ?? [];
+  const students = useQuery(api.students.list.list) ?? EMPTY_STUDENTS;
+  const predictions = useQuery(api.ml.predictions.getPredictions) ?? EMPTY_PREDICTIONS;
 
   const totalStudents = students.length;
 

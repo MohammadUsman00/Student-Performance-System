@@ -1,0 +1,48 @@
+# Student Performance System — containerized UI + ML API.
+#
+# Convex (database + serverless functions) is NOT run in Docker; it stays on
+# Convex Cloud. Set VITE_CONVEX_URL to your deployment URL at image build time.
+#
+# ML actions run on Convex servers and call ML_SERVICE_URL. For Docker ML on your
+# machine to receive those calls, expose port 8000 publicly (e.g. ngrok) and run:
+#   npx convex env set ML_SERVICE_URL https://your-tunnel-url
+#
+# Usage:
+#   cp docker-compose.env.example .env
+#   # Set VITE_CONVEX_URL in .env (Convex HTTPS URL from `npx convex dev` or dashboard)
+#   docker compose up --build
+#
+# Frontend: http://localhost:8080  |  ML: http://localhost:8000/health
+
+name: student-performance-system
+
+services:
+  ml-service:
+    build:
+      context: ./ml-service
+    ports:
+      - "${ML_HOST_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()\"",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_CONVEX_URL: ${VITE_CONVEX_URL:?set VITE_CONVEX_URL in .env - see docker-compose.env.example}
+    ports:
+      - "${FRONTEND_HOST_PORT:-8080}:80"
+    depends_on:
+      ml-service:
+        condition: service_healthy
+    restart: unless-stopped

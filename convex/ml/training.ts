@@ -2,13 +2,12 @@ import { v } from "convex/values";
 import { action, mutation } from "../_generated/server";
 import { api } from "../_generated/api";
 import type { ActionCtx } from "../_generated/server";
-
-const ML_SERVICE_URL = "http://localhost:8000";
+import { mlServiceBaseUrl } from "./serviceUrl";
 
 export const triggerTraining = action({
   args: {},
   handler: async (ctx: ActionCtx) => {
-    const response = await fetch(`${ML_SERVICE_URL}/train-all`, {
+    const response = await fetch(`${mlServiceBaseUrl()}/train-all`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     });

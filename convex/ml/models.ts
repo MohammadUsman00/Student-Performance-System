@@ -1,8 +1,7 @@
 import { v } from "convex/values";
 import { action, mutation, query } from "../_generated/server";
 import type { ActionCtx } from "../_generated/server";
-
-const ML_SERVICE_URL = "http://localhost:8000";
+import { mlServiceBaseUrl } from "./serviceUrl";
 
 export const setActiveModel = mutation({
   args: { modelName: v.string() },
@@ -70,7 +69,7 @@ export const checkHealth = action({
   args: {},
   handler: async (_ctx: ActionCtx) => {
     try {
-      const resp = await fetch(`${ML_SERVICE_URL}/health`, {
+      const resp = await fetch(`${mlServiceBaseUrl()}/health`, {
         signal: AbortSignal.timeout(5000),
       });
       if (resp.ok) {

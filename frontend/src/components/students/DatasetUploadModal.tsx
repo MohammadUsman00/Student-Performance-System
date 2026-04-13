@@ -9,88 +9,76 @@ import {
   AlertCircle,
   Loader2,
   Trash2,
+  ArrowRight,
 } from "lucide-react";
 import { api } from "../../../../convex/_generated/api";
+import {
+  STUDENT_FIELDS,
+  type ColumnMapping,
+  type StudentFieldKey,
+  suggestColumnMapping,
+  NUMERIC_FIELDS,
+  BOOLEAN_FIELDS,
+} from "../../lib/csvColumnMapping";
+import {
+  parseCsvRecords,
+  buildStudentRows,
+  getUnsetKeys,
+} from "../../lib/csvImportPipeline";
+import type { StudentRow } from "../../../../convex/students/defaults";
 
-type UploadState = "idle" | "preview" | "uploading" | "success" | "error";
+type UploadState =
+  | "idle"
+  | "mapping"
+  | "preview"
+  | "uploading"
+  | "success"
+  | "error";
 
 interface DatasetUploadModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-/** Expected CSV header keys (matching student schema). */
-const REQUIRED_HEADERS = [
-  "name", "studentId", "email", "gender", "age", "address", "famsize", "Pstatus",
-  "Medu", "Fedu", "Mjob", "Fjob", "reason", "guardian",
-  "traveltime", "studytime", "failures",
-  "schoolsup", "famsup", "paid", "activities", "nursery", "higher", "internet", "romantic",
-  "famrel", "freetime", "goout", "Dalc", "Walc", "health", "absences", "previousMarks",
-];
-
-const NUMERIC_FIELDS = new Set([
-  "age", "Medu", "Fedu", "traveltime", "studytime", "failures",
-  "famrel", "freetime", "goout", "Dalc", "Walc", "health", "absences", "previousMarks",
-]);
-
-const BOOLEAN_FIELDS = new Set([
-  "schoolsup", "famsup", "paid", "activities", "nursery", "higher", "internet", "romantic",
-]);
-
-function parseCSV(text: string): Record<string, string>[] {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim());
-  if (lines.length < 2) return [];
-  const headers = lines[0].split(",").map((h) => h.trim().replace(/^["']|["']$/g, ""));
-  return lines.slice(1).map((line) => {
-    const values = line.split(",").map((v) => v.trim().replace(/^["']|["']$/g, ""));
-    const obj: Record<string, string> = {};
-    headers.forEach((h, i) => {
-      obj[h] = values[i] ?? "";
-    });
-    return obj;
-  });
-}
-
-function coerceRow(
-  raw: Record<string, string>
-): Record<string, string | number | boolean> | null {
-  const row: Record<string, string | number | boolean> = {};
-  for (const key of REQUIRED_HEADERS) {
-    const val = raw[key];
-    if (val === undefined || val === "") return null;
-
-    if (NUMERIC_FIELDS.has(key)) {
-      const n = Number(val);
-      if (isNaN(n)) return null;
-      row[key] = n;
-    } else if (BOOLEAN_FIELDS.has(key)) {
-      row[key] = val === "true" || val === "yes" || val === "1" || val === "True" || val === "Yes";
-    } else {
-      row[key] = val;
-    }
-  }
-  return row;
-}
+const NONE = "__none__";
 
 export function DatasetUploadModal({ open, onOpenChange }: DatasetUploadModalProps) {
   const batchCreate = useMutation(api.students.batchCreate.batchCreate);
+  const clearAllApplicationData = useMutation(api.clearData.clearAllApplicationData);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const [state, setState] = useState<UploadState>("idle");
   const [fileName, setFileName] = useState<string | null>(null);
-  const [previewRows, setPreviewRows] = useState<Record<string, string | number | boolean>[]>([]);
+  const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
+  const [rawRows, setRawRows] = useState<Record<string, string>[]>([]);
+  const [mapping, setMapping] = useState<ColumnMapping>({});
+  const [useImputation, setUseImputation] = useState(true);
+
+  const [previewPartials, setPreviewPartials] = useState<Record<string, unknown>[]>(
+    []
+  );
+  const [previewRows, setPreviewRows] = useState<StudentRow[]>([]);
+
   const [rawCount, setRawCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{ inserted: number; skipped: number } | null>(null);
   const [dragActive, setDragActive] = useState(false);
+  /** When true, import first clears all students, predictions, and model history. */
+  const [startFresh, setStartFresh] = useState(false);
 
   const reset = useCallback(() => {
     setState("idle");
     setFileName(null);
+    setCsvHeaders([]);
+    setRawRows([]);
+    setMapping({});
+    setUseImputation(true);
+    setPreviewPartials([]);
     setPreviewRows([]);
     setRawCount(0);
     setError(null);
     setResult(null);
+    setStartFresh(false);
     if (fileRef.current) fileRef.current.value = "";
   }, []);
 
@@ -104,54 +92,58 @@ export function DatasetUploadModal({ open, onOpenChange }: DatasetUploadModalPro
 
   const processFile = useCallback((file: File) => {
     setError(null);
-    if (!file.name.endsWith(".csv")) {
+    if (!file.name.toLowerCase().endsWith(".csv")) {
       setError("Please upload a .csv file.");
       return;
     }
 
     const reader = new FileReader();
     reader.onload = (e) => {
-      const text = e.target?.result as string;
-      const rawRows = parseCSV(text);
-      if (rawRows.length === 0) {
-        setError("CSV file is empty or invalid.");
-        return;
-      }
-
-      // Check headers
-      const headers = Object.keys(rawRows[0]);
-      const missing = REQUIRED_HEADERS.filter((h) => !headers.includes(h));
-      if (missing.length > 0) {
-        setError(`Missing columns: ${missing.slice(0, 5).join(", ")}${missing.length > 5 ? ` (+${missing.length - 5} more)` : ""}`);
-        return;
-      }
-
-      const coerced: Record<string, string | number | boolean>[] = [];
-      let badRows = 0;
-      for (const raw of rawRows) {
-        const row = coerceRow(raw);
-        if (row) {
-          coerced.push(row);
-        } else {
-          badRows++;
+      try {
+        const text = e.target?.result as string;
+        const { headers, rows } = parseCsvRecords(text);
+        if (rows.length === 0) {
+          setError("CSV has no data rows.");
+          return;
         }
+        setFileName(file.name);
+        setCsvHeaders(headers);
+        setRawRows(rows);
+        setRawCount(rows.length);
+        setMapping(suggestColumnMapping(headers));
+        setState("mapping");
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Could not read CSV.");
       }
-
-      if (coerced.length === 0) {
-        setError("No valid rows found. Check data types and required fields.");
-        return;
-      }
-
-      setFileName(file.name);
-      setRawCount(rawRows.length);
-      setPreviewRows(coerced);
-      if (badRows > 0) {
-        setError(`${badRows} row(s) skipped due to invalid/missing data.`);
-      }
-      setState("preview");
     };
     reader.readAsText(file);
   }, []);
+
+  const setMappingField = (field: StudentFieldKey, csvColumn: string) => {
+    setMapping((m) => {
+      const next = { ...m };
+      if (!csvColumn || csvColumn === NONE) {
+        delete next[field];
+      } else {
+        next[field] = csvColumn;
+      }
+      return next;
+    });
+  };
+
+  const goToPreview = useCallback(() => {
+    setError(null);
+    try {
+      const { rows, partialsBeforeMerge } = buildStudentRows(rawRows, mapping, {
+        impute: useImputation,
+      });
+      setPreviewRows(rows);
+      setPreviewPartials(partialsBeforeMerge);
+      setState("preview");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not build preview.");
+    }
+  }, [rawRows, mapping, useImputation]);
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
@@ -167,13 +159,17 @@ export function DatasetUploadModal({ open, onOpenChange }: DatasetUploadModalPro
     setState("uploading");
     setError(null);
     try {
-      // Convex has transaction limits; batch in groups of 50
-      const BATCH_SIZE = 50;
+      if (startFresh) {
+        await clearAllApplicationData();
+      }
+
+      /** Keep each mutation fast; Convex mutations ~1s max — large CSVs use many sequential chunks. */
+      const BATCH_SIZE = 25;
       let totalInserted = 0;
       let totalSkipped = 0;
 
-      for (let i = 0; i < previewRows.length; i += BATCH_SIZE) {
-        const batch = previewRows.slice(i, i + BATCH_SIZE);
+      for (let i = 0; i < previewPartials.length; i += BATCH_SIZE) {
+        const batch = previewPartials.slice(i, i + BATCH_SIZE);
         const r = await batchCreate({
           students: batch as Parameters<typeof batchCreate>[0]["students"],
         });
@@ -189,19 +185,22 @@ export function DatasetUploadModal({ open, onOpenChange }: DatasetUploadModalPro
     }
   };
 
+  const unsetStats = previewPartials.length
+    ? getUnsetKeys(previewPartials[0]).length
+    : 0;
+
   return (
     <Dialog.Root open={open} onOpenChange={handleOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 bg-black/70 backdrop-blur-sm z-40" />
-        <Dialog.Content className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-2xl glass-card rounded-2xl p-0 max-h-[85vh] flex flex-col animate-fade-in">
-          {/* Header */}
-          <div className="flex items-center justify-between px-6 pt-6 pb-4">
+        <Dialog.Content className="!fixed left-1/2 top-1/2 z-50 flex h-auto min-h-0 w-[min(100vw-2rem,48rem)] max-h-[min(90dvh,900px)] max-w-3xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl p-0 glass-card animate-modal-content outline-none focus:outline-none">
+          <div className="flex items-center justify-between px-6 pt-6 pb-4 shrink-0">
             <div>
               <Dialog.Title className="text-xl font-bold text-white">
                 Upload Dataset
               </Dialog.Title>
               <Dialog.Description className="text-sm text-slate-500 mt-1">
-                Import students from a CSV file
+                Map your CSV columns to student fields. Unmapped values use defaults.
               </Dialog.Description>
             </div>
             <Dialog.Close asChild>
@@ -211,8 +210,7 @@ export function DatasetUploadModal({ open, onOpenChange }: DatasetUploadModalPro
             </Dialog.Close>
           </div>
 
-          <div className="flex-1 overflow-y-auto px-6 pb-6">
-            {/* Success View */}
+          <div className="flex-1 overflow-y-auto px-6 pb-6 min-h-0">
             {state === "success" && result && (
               <div className="text-center py-8">
                 <CheckCircle className="w-16 h-16 text-emerald-400 mx-auto mb-4" />
@@ -234,14 +232,16 @@ export function DatasetUploadModal({ open, onOpenChange }: DatasetUploadModalPro
               </div>
             )}
 
-            {/* Upload / Drop Zone */}
             {state === "idle" && (
               <>
                 <div
                   className={`drop-zone p-12 text-center cursor-pointer ${
                     dragActive ? "drop-zone--active" : ""
                   }`}
-                  onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setDragActive(true);
+                  }}
                   onDragLeave={() => setDragActive(false)}
                   onDrop={handleDrop}
                   onClick={() => fileRef.current?.click()}
@@ -251,7 +251,7 @@ export function DatasetUploadModal({ open, onOpenChange }: DatasetUploadModalPro
                     Drag & drop your CSV file here
                   </p>
                   <p className="text-slate-500 text-sm">
-                    or click to browse files
+                    Kaggle / UCI-style column names are auto-suggested in the next step.
                   </p>
                   <input
                     ref={fileRef}
@@ -264,38 +264,21 @@ export function DatasetUploadModal({ open, onOpenChange }: DatasetUploadModalPro
                     }}
                   />
                 </div>
-
-                {/* Column reference */}
-                <div className="mt-6">
-                  <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-                    Required CSV Columns
-                  </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {REQUIRED_HEADERS.map((h) => (
-                      <span
-                        key={h}
-                        className="px-2 py-0.5 rounded-md bg-white/5 border border-white/8 text-[10px] font-mono text-slate-400"
-                      >
-                        {h}
-                      </span>
-                    ))}
-                  </div>
-                </div>
               </>
             )}
 
-            {/* Preview */}
-            {state === "preview" && (
+            {state === "mapping" && (
               <>
                 <div className="flex items-center gap-3 mb-4 p-4 rounded-xl bg-white/[0.03] border border-white/5">
                   <FileSpreadsheet className="w-8 h-8 text-indigo-400 shrink-0" />
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-semibold text-white truncate">{fileName}</p>
                     <p className="text-xs text-slate-500">
-                      {rawCount} rows • {previewRows.length} valid
+                      {rawCount} rows · {csvHeaders.length} columns detected
                     </p>
                   </div>
                   <button
+                    type="button"
                     onClick={reset}
                     className="p-2 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
                   >
@@ -303,8 +286,81 @@ export function DatasetUploadModal({ open, onOpenChange }: DatasetUploadModalPro
                   </button>
                 </div>
 
-                {/* Preview table */}
-                <div className="overflow-x-auto rounded-xl border border-white/5 max-h-[300px]">
+                <label className="flex items-center gap-2 mb-4 cursor-pointer text-sm text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={useImputation}
+                    onChange={(e) => setUseImputation(e.target.checked)}
+                    className="rounded border-white/20"
+                  />
+                  Impute empty cells using column median (numbers) or mode (text/boolean)
+                </label>
+
+                <div className="rounded-xl border border-white/5 overflow-hidden max-h-[45vh] overflow-y-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="sticky top-0 bg-[#111836] z-10">
+                      <tr>
+                        <th className="px-3 py-2 text-slate-400 font-bold">Field</th>
+                        <th className="px-3 py-2 text-slate-400 font-bold">CSV column</th>
+                        <th className="px-3 py-2 text-slate-500 font-bold">Type</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {STUDENT_FIELDS.map((field) => (
+                        <tr key={field} className="hover:bg-white/[0.02]">
+                          <td className="px-3 py-2 font-mono text-indigo-300">{field}</td>
+                          <td className="px-3 py-2">
+                            <select
+                              value={mapping[field] ?? NONE}
+                              onChange={(e) =>
+                                setMappingField(field, e.target.value)
+                              }
+                              className="w-full max-w-[220px] rounded-lg bg-black/30 border border-white/10 px-2 py-1.5 text-white text-xs"
+                            >
+                              <option value={NONE}>— None (use default) —</option>
+                              {csvHeaders.map((h) => (
+                                <option key={h} value={h}>
+                                  {h}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="px-3 py-2 text-slate-500">
+                            {NUMERIC_FIELDS.has(field)
+                              ? "number"
+                              : BOOLEAN_FIELDS.has(field)
+                                ? "boolean"
+                                : "string"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+
+            {state === "preview" && (
+              <>
+                <div className="flex items-center gap-3 mb-4 p-4 rounded-xl bg-white/[0.03] border border-white/5">
+                  <FileSpreadsheet className="w-8 h-8 text-indigo-400 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-white truncate">{fileName}</p>
+                    <p className="text-xs text-slate-500">
+                      {rawCount} rows · {previewRows.length} after merge · Sample row:{" "}
+                      {unsetStats} fields from defaults
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setState("mapping")}
+                    className="text-xs text-indigo-400 hover:text-indigo-300 shrink-0"
+                  >
+                    Edit mapping
+                  </button>
+                </div>
+
+                <div className="overflow-x-auto rounded-xl border border-white/5 max-h-[280px]">
                   <table className="w-full text-left text-xs">
                     <thead className="sticky top-0 bg-[#111836]">
                       <tr>
@@ -313,42 +369,51 @@ export function DatasetUploadModal({ open, onOpenChange }: DatasetUploadModalPro
                         <th className="px-3 py-2 text-slate-500 font-bold">ID</th>
                         <th className="px-3 py-2 text-slate-500 font-bold">Email</th>
                         <th className="px-3 py-2 text-slate-500 font-bold">Age</th>
-                        <th className="px-3 py-2 text-slate-500 font-bold">Gender</th>
+                        <th className="px-3 py-2 text-slate-500 font-bold">Unset*</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/5">
-                      {previewRows.slice(0, 20).map((row, i) => (
+                      {previewRows.slice(0, 15).map((row, i) => (
                         <tr key={i} className="hover:bg-white/[0.02]">
                           <td className="px-3 py-2 text-slate-600">{i + 1}</td>
-                          <td className="px-3 py-2 text-white font-medium">{row.name as string}</td>
-                          <td className="px-3 py-2 font-mono text-slate-400">{row.studentId as string}</td>
-                          <td className="px-3 py-2 text-slate-400">{row.email as string}</td>
-                          <td className="px-3 py-2 text-slate-400">{String(row.age)}</td>
-                          <td className="px-3 py-2 text-slate-400">{row.gender as string}</td>
+                          <td className="px-3 py-2 text-white font-medium">{row.name}</td>
+                          <td className="px-3 py-2 font-mono text-slate-400">
+                            {row.studentId}
+                          </td>
+                          <td className="px-3 py-2 text-slate-400 truncate max-w-[140px]">
+                            {row.email}
+                          </td>
+                          <td className="px-3 py-2 text-slate-400">{row.age}</td>
+                          <td className="px-3 py-2 text-amber-400/90">
+                            {getUnsetKeys(previewPartials[i] ?? {}).length}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
-                {previewRows.length > 20 && (
+                <p className="text-[10px] text-slate-500 mt-2">
+                  *Unset = columns not mapped or empty; values filled from defaults on the server.
+                </p>
+                {previewRows.length > 15 && (
                   <p className="text-xs text-slate-600 mt-2 text-right">
-                    Showing 20 of {previewRows.length} rows
+                    Showing 15 of {previewRows.length} rows
                   </p>
                 )}
               </>
             )}
 
-            {/* Uploading */}
             {state === "uploading" && (
               <div className="text-center py-12">
                 <Loader2 className="w-10 h-10 text-indigo-400 mx-auto mb-4 animate-spin" />
-                <p className="text-white font-semibold">Importing {previewRows.length} students…</p>
+                <p className="text-white font-semibold">
+                  Importing {previewPartials.length} students…
+                </p>
                 <p className="text-slate-500 text-sm mt-1">This may take a moment.</p>
               </div>
             )}
 
-            {/* Error display */}
-            {error && (
+            {error && state !== "success" && (
               <div className="mt-4 rounded-xl border border-red-500/20 bg-red-500/8 p-3 flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
                 <p className="text-xs text-red-300">{error}</p>
@@ -356,21 +421,56 @@ export function DatasetUploadModal({ open, onOpenChange }: DatasetUploadModalPro
             )}
           </div>
 
-          {/* Footer for preview state */}
-          {state === "preview" && (
-            <div className="flex justify-end gap-3 px-6 py-4 border-t border-white/5">
+          {state === "mapping" && (
+            <div className="flex justify-end gap-3 px-6 py-4 border-t border-white/5 shrink-0">
               <button
+                type="button"
                 onClick={reset}
                 className="px-5 py-2.5 rounded-xl text-sm font-semibold text-slate-400 hover:text-white transition-colors"
               >
                 Cancel
               </button>
               <button
-                onClick={() => void handleSubmit()}
-                className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-8 py-2.5 rounded-xl transition-all active:scale-95"
+                type="button"
+                onClick={goToPreview}
+                className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-6 py-2.5 rounded-xl inline-flex items-center gap-2"
               >
-                Import {previewRows.length} Students
+                Preview <ArrowRight className="w-4 h-4" />
               </button>
+            </div>
+          )}
+
+          {state === "preview" && (
+            <div className="shrink-0 space-y-3 border-t border-white/5 px-6 py-4">
+              <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-3">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4 rounded border-slate-600 bg-slate-900 text-indigo-600"
+                  checked={startFresh}
+                  onChange={(e) => setStartFresh(e.target.checked)}
+                />
+                <span className="text-xs text-amber-100/95 leading-relaxed">
+                  <span className="font-bold text-amber-200">Start fresh</span> — delete all
+                  existing students, predictions, and model training history, then import this file.
+                  Use this for a clean dataset with new charts and insights.
+                </span>
+              </label>
+              <div className="flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={reset}
+                  className="px-5 py-2.5 rounded-xl text-sm font-semibold text-slate-400 hover:text-white transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSubmit()}
+                  className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-8 py-2.5 rounded-xl transition-all active:scale-95"
+                >
+                  Import {previewPartials.length} Students
+                </button>
+              </div>
             </div>
           )}
         </Dialog.Content>

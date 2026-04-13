@@ -11,9 +11,10 @@ export const list = query({
 export const getById = query({
   args: { studentId: v.string() },
   handler: async (ctx, args) => {
-    return await ctx.db
+    const rows = await ctx.db
       .query("students")
       .withIndex("by_studentId", (q) => q.eq("studentId", args.studentId))
-      .unique();
+      .take(1);
+    return rows[0] ?? null;
   },
 });
