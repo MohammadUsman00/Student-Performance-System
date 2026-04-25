@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import Dict, Any
 import pandas as pd
 import numpy as np
 import time
@@ -8,7 +8,15 @@ from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LinearRegression
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+)
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.pipeline import Pipeline
@@ -39,7 +47,16 @@ CATEGORICAL_FEATURES = [
 
 class PredictRequest(BaseModel):
     studentData: Dict[str, Any]
-    modelName: str # linear_regression, random_forest, decision_tree
+    modelName: str  # linear_regression, random_forest, decision_tree
+
+
+class TrainAllRequest(BaseModel):
+    students: list[Dict[str, Any]]
+
+
+class PredictBatchRequest(BaseModel):
+    students: list[Dict[str, Any]]
+    modelName: str
 
 # Model Pipelines
 pipelines = {
@@ -49,6 +66,22 @@ pipelines = {
 }
 
 is_trained = False
+trained_sample_count = 0
+last_trained_at = 0
+
+TARGET_COLUMN = "previousMarks"
+PREDICT_BOOLEAN_FIELDS = [
+    "schoolsup",
+    "famsup",
+    "paid",
+    "activities",
+    "nursery",
+    "higher",
+    "internet",
+    "romantic",
+]
+TRAIN_NUMERICAL_FEATURES = [f for f in NUMERICAL_FEATURES if f != TARGET_COLUMN]
+TRAIN_FEATURES = TRAIN_NUMERICAL_FEATURES + CATEGORICAL_FEATURES
 
 def get_risk_level(score: float) -> str:
     if score >= 75:
@@ -80,122 +113,163 @@ def get_classification_metrics(y_true_cont, y_pred_cont):
 def create_pipeline(model):
     preprocessor = ColumnTransformer(
         transformers=[
-            ('num', StandardScaler(), NUMERICAL_FEATURES),
-            ('cat', OneHotEncoder(handle_unknown='ignore'), CATEGORICAL_FEATURES)
-        ])
-    
+            ("num", StandardScaler(), TRAIN_NUMERICAL_FEATURES),
+            ("cat", OneHotEncoder(handle_unknown="ignore"), CATEGORICAL_FEATURES),
+        ]
+    )
+
     return Pipeline(steps=[
-        ('preprocessor', preprocessor),
-        ('regressor', model)
+        ("preprocessor", preprocessor),
+        ("regressor", model),
     ])
 
+def normalize_student_dict(student: Dict[str, Any]) -> Dict[str, Any]:
+    row = dict(student)
+    for feat in PREDICT_BOOLEAN_FIELDS:
+        if feat in row:
+            val = row[feat]
+            if val is True:
+                row[feat] = "yes"
+            elif val is False:
+                row[feat] = "no"
+            elif isinstance(val, str):
+                row[feat] = val.strip().lower()
+    return row
+
+
+def coerce_input_df(raw_rows: list[Dict[str, Any]]) -> pd.DataFrame:
+    rows = [normalize_student_dict(r) for r in raw_rows]
+    df = pd.DataFrame(rows)
+
+    for col in TRAIN_NUMERICAL_FEATURES + [TARGET_COLUMN]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        else:
+            df[col] = np.nan
+
+    for col in CATEGORICAL_FEATURES:
+        if col not in df.columns:
+            df[col] = "other"
+        else:
+            series = df[col].astype(str).str.strip()
+            series = series.replace({"": "other", "nan": "other", "None": "other"})
+            df[col] = series
+
+    for col in TRAIN_NUMERICAL_FEATURES:
+        median = float(df[col].median()) if df[col].notna().any() else 0.0
+        df[col] = df[col].fillna(median)
+
+    return df
+
+
 @app.post("/train-all")
-async def train_all():
-    global is_trained, pipelines
-    # Simulate Kaggle dataset structure (UCI Student Performance)
-    np.random.seed(42)
-    n_samples = 1500
-    
-    data = {}
-    for feat in NUMERICAL_FEATURES:
-        if feat == "age": data[feat] = np.random.randint(15, 22, n_samples)
-        elif feat in ["Medu", "Fedu"]: data[feat] = np.random.randint(0, 5, n_samples)
-        elif feat in ["traveltime", "studytime"]: data[feat] = np.random.randint(1, 5, n_samples)
-        elif feat == "failures": data[feat] = np.random.randint(0, 4, n_samples)
-        elif feat == "absences": data[feat] = np.random.randint(0, 30, n_samples)
-        elif feat == "previousMarks": data[feat] = np.random.uniform(40, 100, n_samples)
-        else: data[feat] = np.random.randint(1, 6, n_samples) # health, Dalc, etc
-        
-    for feat in CATEGORICAL_FEATURES:
-        if feat == "gender": data[feat] = np.random.choice(["M", "F"], n_samples)
-        elif feat == "address": data[feat] = np.random.choice(["U", "R"], n_samples)
-        elif feat == "famsize": data[feat] = np.random.choice(["GT3", "LE3"], n_samples)
-        elif feat == "Pstatus": data[feat] = np.random.choice(["T", "A"], n_samples)
-        elif feat in ["Mjob", "Fjob"]: data[feat] = np.random.choice(["teacher", "health", "services", "at_home", "other"], n_samples)
-        elif feat == "reason": data[feat] = np.random.choice(["home", "reputation", "course", "other"], n_samples)
-        elif feat == "guardian": data[feat] = np.random.choice(["mother", "father", "other"], n_samples)
-        else: data[feat] = np.random.choice(["yes", "no"], n_samples)
-        
-    df = pd.DataFrame(data)
-    
-    # Target score calculation (some noise + weights)
-    # Weights for some key features
-    score = (df['studytime'] * 4) + (df['previousMarks'] * 0.5) - (df['failures'] * 10) + (df['Medu'] * 2) - (df['absences'] * 0.5)
-    # Influence of some categorical (e.g. schoolsup)
-    score += df['schoolsup'].apply(lambda x: 5 if x == "yes" else 0)
-    score += np.random.normal(10, 5, n_samples)
-    score = np.clip(score, 0, 100)
-    
-    X = df[NUMERICAL_FEATURES + CATEGORICAL_FEATURES]
-    y = score
-    
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
+async def train_all(req: TrainAllRequest):
+    global is_trained, pipelines, trained_sample_count, last_trained_at
+
+    if not req.students:
+        raise HTTPException(status_code=400, detail="No students provided for training")
+
+    df = coerce_input_df(req.students)
+    train_df = df[df[TARGET_COLUMN].notna()].copy()
+
+    if len(train_df) < 20:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Need at least 20 students with '{TARGET_COLUMN}' for training. Found {len(train_df)}.",
+        )
+
+    X = train_df[TRAIN_FEATURES]
+    y = train_df[TARGET_COLUMN].astype(float).clip(0, 100)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
     model_defs = {
         "linear_regression": LinearRegression(),
         "random_forest": RandomForestRegressor(n_estimators=100, random_state=42),
-        "decision_tree": DecisionTreeRegressor(random_state=42)
+        "decision_tree": DecisionTreeRegressor(random_state=42),
     }
-    
+
     results = []
-    
+
     for name, model in model_defs.items():
         pipeline = create_pipeline(model)
         pipeline.fit(X_train, y_train)
         pipelines[name] = pipeline
-        
+
         y_pred = pipeline.predict(X_test)
-        
+
         results.append({
             "modelName": name,
             "regressionMetrics": {
                 "mae": float(mean_absolute_error(y_test, y_pred)),
                 "rmse": float(np.sqrt(mean_squared_error(y_test, y_pred))),
-                "r2": float(r2_score(y_test, y_pred))
+                "r2": float(r2_score(y_test, y_pred)),
             },
             "classificationMetrics": get_classification_metrics(y_test, y_pred),
-            "lastTrained": int(time.time())
+            "lastTrained": int(time.time()),
         })
-    
+
     is_trained = True
-    return {"status": "success", "metrics": results}
+    trained_sample_count = int(len(train_df))
+    last_trained_at = int(time.time())
+
+    return {
+        "status": "success",
+        "trainingRows": trained_sample_count,
+        "metrics": results,
+    }
+
+
+def predict_scores(
+    rows: list[Dict[str, Any]], model_name: str
+) -> list[Dict[str, Any]]:
+    if not is_trained:
+        raise HTTPException(
+            status_code=409, detail="Model is not trained. Train first with /train-all."
+        )
+
+    pipeline = pipelines.get(model_name)
+    if pipeline is None:
+        raise HTTPException(status_code=404, detail="Model pipeline not found")
+
+    input_df = coerce_input_df(rows)
+    X = input_df[TRAIN_FEATURES]
+    predicted = pipeline.predict(X)
+
+    results: list[Dict[str, Any]] = []
+    for score in predicted:
+        clipped = min(100.0, max(0.0, float(score)))
+        results.append(
+            {
+                "predictedScore": clipped,
+                "riskLevel": get_risk_level(clipped),
+                "modelUsed": model_name,
+            }
+        )
+    return results
 
 @app.post("/predict")
 async def predict(req: PredictRequest):
-    if not is_trained:
-        await train_all()
-        
-    pipeline = pipelines.get(req.modelName)
-    if not pipeline:
-        raise HTTPException(status_code=404, detail="Model pipeline not found")
-    
-    # Preprocess boolean fields from Convex (true/false) to API strings (yes/no)
-    data_dict = req.studentData.copy()
-    for feat in ["schoolsup", "famsup", "paid", "activities", "nursery", "higher", "internet", "romantic"]:
-        if feat in data_dict:
-            data_dict[feat] = "yes" if data_dict[feat] is True else ("no" if data_dict[feat] is False else data_dict[feat])
-            
-    input_df = pd.DataFrame([data_dict])
-    
-    # Ensure all columns exist in input_df
-    for col in NUMERICAL_FEATURES + CATEGORICAL_FEATURES:
-        if col not in input_df.columns:
-            # Provide sensible defaults if missing
-            if col in NUMERICAL_FEATURES: input_df[col] = 0
-            else: input_df[col] = "other"
+    results = predict_scores([req.studentData], req.modelName)
+    return results[0]
 
-    prediction = float(pipeline.predict(input_df)[0])
-    prediction = min(100, max(0, prediction))
-    
-    return {
-        "predictedScore": prediction,
-        "riskLevel": get_risk_level(prediction),
-        "modelUsed": req.modelName
-    }
+
+@app.post("/predict-batch")
+async def predict_batch(req: PredictBatchRequest):
+    if not req.students:
+        return {"predictions": []}
+    return {"predictions": predict_scores(req.students, req.modelName)}
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "trained": is_trained}
+    return {
+        "status": "ok",
+        "trained": is_trained,
+        "trainedSamples": trained_sample_count,
+        "lastTrainedAt": last_trained_at,
+    }
 
 if __name__ == "__main__":
     import uvicorn
