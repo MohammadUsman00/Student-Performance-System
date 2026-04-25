@@ -31,30 +31,39 @@ export const predictAll = action({
     );
     const modelName = activeModel?.modelName || "linear_regression";
 
+    const mlRows = students.map((s) => extractMlFeatures(s));
+    const response = await fetch(`${mlServiceBaseUrl()}/predict-batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ students: mlRows, modelName }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "Unknown error");
+      throw new Error(`Batch prediction failed: ${response.status} — ${text}`);
+    }
+
+    const payload = (await response.json()) as {
+      predictions: Array<{ predictedScore: number; riskLevel: string }>;
+    };
+    const returned = payload.predictions ?? [];
+    if (returned.length !== students.length) {
+      throw new Error(
+        `Batch prediction mismatch: expected ${students.length}, got ${returned.length}.`
+      );
+    }
+
     const predictions: Array<Record<string, unknown>> = [];
-
-    for (const student of students) {
-      const mlFeatures = extractMlFeatures(student);
-
-      const resp = await fetch(`${mlServiceBaseUrl()}/predict`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          studentData: mlFeatures,
-          modelName,
-        }),
+    for (let i = 0; i < students.length; i++) {
+      const student = students[i]!;
+      const pred = returned[i]!;
+      await ctx.runMutation(api.ml.predictions.storePrediction, {
+        studentId: student.studentId,
+        predictedScore: pred.predictedScore,
+        riskLevel: pred.riskLevel,
+        activeModel: modelName,
       });
-
-      if (resp.ok) {
-        const pred = await resp.json();
-        await ctx.runMutation(api.ml.predictions.storePrediction, {
-          studentId: student.studentId,
-          predictedScore: pred.predictedScore,
-          riskLevel: pred.riskLevel,
-          activeModel: modelName,
-        });
-        predictions.push({ id: student.studentId, ...pred });
-      }
+      predictions.push({ id: student.studentId, ...pred });
     }
 
     return predictions;
